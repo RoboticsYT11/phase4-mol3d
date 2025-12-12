@@ -38,9 +38,9 @@
       <div class="header">
         <div class="title">VR-ChemSim 3D — Phase 4 (Thumb-Index B3)</div>
         <div class="logo-row">
-          <img src="IITB.png" alt="IITB">
-          <img src="Yantrik-logo.jpg" alt="Yantrik">
-          <img src="PMRFLOGO.jpg" alt="PMRF">
+          <img src="/static/IITB.png" alt="IITB">
+          <img src="/static/Yantrik-logo.jpg" alt="Yantrik">
+          <img src="/static/PMRFLOGO.jpg" alt="PMRF">
         </div>
       </div>
 
@@ -278,7 +278,7 @@ async function loadMol(smiles){
   if(!smiles || !smiles.trim()){ setStatus("No SMILES provided"); return; }
   setStatus("Generating 3D...");
   try {
-    const r = await fetch("/api/molblock", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({smiles}) });
+    const r = await fetch("/molblock", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({smiles}) });
     const j = await r.json();
     if(!j.molblock){ setStatus("Conversion failed: " + (j.error||"no molblock")); return; }
     initViewer();
@@ -314,7 +314,7 @@ async function loadPDB(){
   if(!id.trim()){ setStatus("No PDB id"); return; }
   setStatus("Fetching PDB...");
   try {
-    const r = await fetch(`/api/load_pdb/${id}`);
+    const r = await fetch(`/load_pdb/${id}`);
     const j = await r.json();
     initViewer();
     if(j && j.pdb){
@@ -334,7 +334,7 @@ async function loadPDB(){
 /* fetch predefined molecules + auto-load first */
 async function fetchMoleculeList(){
   try {
-    const r = await fetch("/api/molecules");
+    const r = await fetch("/molecules");
     const mols = await r.json();
     const sel = document.getElementById('moleculeList');
     sel.innerHTML = "";
