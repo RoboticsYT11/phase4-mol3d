@@ -1,4 +1,0 @@
-Flask==2.3.3
-firebase-functions==0.1.0
-rdkit==2023.9.1
-requests==2.31.0
