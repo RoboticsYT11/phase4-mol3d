@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>VR-ChemSim 3D — Phase 4 (B3 Thumb-Index)</title>
+
+  <!-- 3Dmol -->
+  <script src="https://3dmol.csb.pitt.edu/build/3Dmol-min.js"></script>
+
+  <!-- MediaPipe Hands + Camera Utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <style>
+    html,body{height:100%;margin:0;font-family:Arial;background:#fff;overflow:hidden}
+    .container{height:100%;display:flex;flex-direction:column}
+    .top{height:30%;padding:12px 25px;box-sizing:border-box;border-bottom:2px solid #ccc;background:#fff}
+    .header{display:flex;justify-content:space-between;align-items:center}
+    .title{font-size:28px;color:#003a70;font-weight:700}
+    .logo-row{display:flex;gap:20px;align-items:center;transform:scale(1.4) translateY(10%);transform-origin:top right}
+    .logo-row img{height:40px}
+    .controls{margin-top:10px}
+    input,select,button,textarea{font-size:14px;padding:6px;margin-right:10px}
+    button{background:#0078d7;color:#fff;border:0;border-radius:4px;cursor:pointer}
+    button:hover{background:#005fa3}
+    #status{margin-top:6px;font-size:13px;color:#444}
+    .bottom{height:70%;display:flex;justify-content:center;align-items:center;padding:10px;box-sizing:border-box}
+    .viewer-frame{width:100%;height:100%;border:3px solid #ccc;border-radius:10px;position:relative;overflow:hidden;background:#fff}
+    #viewer{width:100%;height:100%}
+    #handUI{position:absolute;top:8px;left:8px;background:rgba(255,255,255,0.92);padding:6px 10px;border-radius:6px;font-size:13px;display:none;z-index:60}
+    #videoElement{display:none}
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <div class="top">
+      <div class="header">
+        <div class="title">VR-ChemSim 3D — Phase 4 (Thumb-Index B3)</div>
+        <div class="logo-row">
+          <img src="/static/IITB.png" alt="IITB">
+          <img src="/static/Yantrik-logo.jpg" alt="Yantrik">
+          <img src="/static/PMRFLOGO.jpg" alt="PMRF">
+        </div>
+      </div>
+
+      <div class="controls">
+        <div style="margin-top:8px;">
+          <label><b>Select Molecule:</b></label>
+          <select id="moleculeList"></select>
+          <input id="smiles" placeholder="or type SMILES manually" size="35">
+          <button id="loadMol">Render 3D</button>
+        </div>
+
+        <div style="margin-top:8px;">
+          <label><b>PDB ID (DNA/RNA/Protein):</b></label>
+          <input id="pdbId" placeholder="e.g. 1BNA, 4V9F" size="20">
+          <button id="loadPDB">Load PDB</button>
+        </div>
+
+        <div style="margin-top:8px;display:flex;align-items:center;gap:10px;">
+          <textarea id="xyzInput" rows="3" style="width:420px" placeholder="Paste XYZ coordinates..."></textarea>
+          <button id="loadXYZ" style="height:45px;">Render XYZ</button>
+        </div>
+
+        <!-- HAND CONTROL + STATUS INLINE -->
+        <div style="margin-top:8px; display:flex; align-items:center; gap:15px; flex-wrap: wrap;">
+          <button id="enableHands">Enable Hand Control</button>
+          <button id="disableHands" disabled>Disable Hand Control</button>
+
+          <button id="toggleLabels">Hide Names</button>
+          <button id="inspectMode">Inspect Mode: Off</button>
+
+          <!-- Status moved inline -->
+          <p id="status" style="margin:0; padding:4px 10px; background:#eef2ff; border-radius:6px;">
+            Status: initializing…
+          </p>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="bottom">
+      <div class="viewer-frame">
+        <div id="viewer"></div>
+
+        <div id="handUI">
+          <div><b>Hand Control (Thumb-Index B3)</b></div>
+          <div id="gestureHint">Waiting for thumb + index...</div>
+        </div>
+
+        <video id="videoElement" playsinline></video>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* =========================
+   VR-ChemSim Phase-4 (B3 Thumb-Index)
+   - Rotation only
+   - Use only Thumb tip (4) and Index tip (8)
+   - Ultra-fast mapping (B3) with EMA smoothing
+   - Keeps naming/labels & click-glow
+   ========================= */
+
+let viewer;
+let selectedAtom = null;
+let showLabels = true;
+let inspectMode = false;
+let infoLabelData = null;
+let handsActive = false;
+let hands = null;
+let cam = null;
+
+const viewerDiv = document.getElementById('viewer');
+const status = document.getElementById('status');
+const gestureHint = document.getElementById('gestureHint');
+const handUI = document.getElementById('handUI');
+
+const highlightStyle = { sphere:{scale:0.40, color:"yellow"}, stick:{radius:0.25, color:"yellow"} };
+
+function setStatus(s){ status.textContent = "Status: " + s; console.log(s); }
+
+/* ---------- Viewer init & helpers ---------- */
+function initViewer(){
+  viewerDiv.innerHTML = "";
+  viewer = $3Dmol.createViewer(viewerDiv, { backgroundColor: "white" });
+  selectedAtom = null;
+  infoLabelData = null;
+}
+
+/* Atom click-to-glow */
+function enableAtomGlow(){
+  if(!viewer) return;
+  try {
+    viewer.setClickable({}, true, function(atom){
+      if(!atom) return;
+      if(selectedAtom && selectedAtom.serial === atom.serial){
+        viewer.setStyle({serial: atom.serial}, {sphere:{scale:0.25}, stick:{radius:0.18}});
+        selectedAtom = null;
+      } else {
+        if(selectedAtom) viewer.setStyle({serial:selectedAtom.serial}, {sphere:{scale:0.25}, stick:{radius:0.18}});
+        viewer.setStyle({serial: atom.serial}, highlightStyle);
+        selectedAtom = atom;
+      }
+
+      if (inspectMode && atom) {
+        showInfoForAtom(atom);
+      }
+
+      refreshLabels();
+      viewer.render();
+    });
+  } catch(e){ console.warn("enableAtomGlow:", e); }
+}
+
+/* Atom labels (same nomenclature style as Phase 1) */
+function annotateAtoms(v){
+  try {
+    const model = v.getModel();
+    if (!model) return;
+    const atoms = model.selectedAtoms({});
+
+    atoms.forEach((atom, idx) => {
+      let labelText = atom.elem;
+
+      // CO₂-style naming, identical logic to Phase 1
+      if (atoms.length === 3 && atom.elem === "O") {
+        labelText = `O${idx === 0 ? "₁" : "₂"}`;
+      } else if (atoms.length === 3 && atom.elem === "C") {
+        labelText = "C (center)";
+      }
+
+      v.addLabel(labelText, {
+        font: "Arial",
+        fontSize: 20,
+        fontColor: "rgb(0, 70, 255)",
+        position: { x: atom.x, y: atom.y, z: atom.z },
+        inFront: true,
+        showBackground: false,
+        alignment: "center",
+        borderThickness: 0
+      });
+    });
+  } catch (e) {
+    console.warn("annotateAtoms:", e);
+  }
+}
+
+/* Bond labeling (A, B, C... same as Phase 1) */
+function annotateBonds(v){
+  try {
+    const model = v.getModel();
+    if (!model || !model.bonds) return;
+
+    const atoms = model.atoms || [];
+    const bonds = model.bonds || [];
+    const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    bonds.forEach((bond, i) => {
+      const a1 = atoms[bond.a1 || bond.atom1];
+      const a2 = atoms[bond.a2 || bond.atom2];
+      if (!a1 || !a2) return;
+
+      const mx = (a1.x + a2.x) / 2;
+      const my = (a1.y + a2.y) / 2;
+      const mz = (a1.z + a2.z) / 2;
+
+      v.addLabel(letters[i % letters.length], {
+        font: "Arial",
+        fontSize: 10,
+        fontColor: "black",
+        position: { x: mx, y: my, z: mz },
+        inFront: true,
+        showBackground: false,
+        alignment: "center",
+        borderThickness: 0
+      });
+    });
+  } catch (e) {
+    console.warn("annotateBonds:", e);
+  }
+}
+
+/* Info label handling */
+function addInfoLabel(){
+  if(!viewer || !infoLabelData) return;
+  viewer.addLabel(infoLabelData.text, {
+    x: infoLabelData.x,
+    y: infoLabelData.y,
+    z: infoLabelData.z
+  }, {
+    font: "Arial",
+    fontSize: 12,
+    fontColor: "black",
+    backgroundColor: "white",
+    backgroundOpacity: 0.92,
+    borderThickness: 1,
+    borderColor: "rgb(80,80,80)",
+    alignment: "left",
+    inFront: true
+  });
+}
+
+function showInfoForAtom(atom){
+  const bonds = atom.bonds || [];
+  infoLabelData = {
+    text: `Atom: ${atom.elem}\nSerial: ${atom.serial}\nBonds: ${bonds.length}`,
+    x: atom.x,
+    y: atom.y,
+    z: atom.z
+  };
+  refreshLabels();
+}
+
+function refreshLabels(){
+  if(!viewer) return;
+  try { viewer.removeAllLabels(); } catch(e){}
+  if(showLabels){
+    annotateAtoms(viewer);
+    annotateBonds(viewer);
+  }
+  addInfoLabel();
+  try { viewer.render(); } catch(e){}
+}
+
+function applyDefaultLabels(){
+  if(!viewer) return;
+  if(showLabels){
+    annotateAtoms(viewer);
+    annotateBonds(viewer);
+  }
+  addInfoLabel();
+}
+
+/* ---------- Loaders (SMILES, XYZ, PDB) ---------- */
+async function loadMol(smiles){
+  if(!smiles || !smiles.trim()){ setStatus("No SMILES provided"); return; }
+  setStatus("Generating 3D...");
+  try {
+    const r = await fetch("/molblock", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({smiles}) });
+    const j = await r.json();
+    if(!j.molblock){ setStatus("Conversion failed: " + (j.error||"no molblock")); return; }
+    initViewer();
+    viewer.addModel(j.molblock, "mol");
+    viewer.setStyle({}, { stick:{radius:0.18}, sphere:{scale:0.25} });
+    try { viewer.zoomTo(); } catch(e){}
+    applyDefaultLabels();
+    enableAtomGlow();
+    viewer.render();
+    setStatus("Molecule rendered.");
+  } catch(e){ console.error(e); setStatus("Error: " + e.toString()); }
+}
+
+async function loadXYZ(){
+  const xyz = document.getElementById('xyzInput').value || "";
+  if(!xyz.trim()){ setStatus("No XYZ provided"); return; }
+  try {
+    const lines = xyz.split(/\r?\n/).filter(l => l.trim().length>0);
+    const final = lines.length + "\nXYZ Model\n" + lines.join("\n");
+    initViewer();
+    viewer.addModel(final, "xyz");
+    viewer.setStyle({}, { sphere:{scale:0.26}, stick:{radius:0.18} });
+    try { viewer.zoomTo(); } catch(e){}
+    applyDefaultLabels();
+    enableAtomGlow();
+    viewer.render();
+    setStatus("XYZ rendered.");
+  } catch(e){ console.error(e); setStatus("XYZ error: " + e.toString()); }
+}
+
+async function loadPDB(){
+  const id = document.getElementById('pdbId').value || "";
+  if(!id.trim()){ setStatus("No PDB id"); return; }
+  setStatus("Fetching PDB...");
+  try {
+    const r = await fetch(`/load_pdb/${id}`);
+    const j = await r.json();
+    initViewer();
+    if(j && j.pdb){
+      viewer.addModel(j.pdb, "pdb");
+      viewer.setStyle({}, { cartoon: { color: "spectrum" } });
+      try { viewer.zoomTo(); } catch(e){}
+      applyDefaultLabels();
+      enableAtomGlow();
+      viewer.render();
+      setStatus(`PDB ${id} loaded.`);
+    } else {
+      setStatus("Invalid or unavailable PDB id.");
+    }
+  } catch(e){ console.error(e); setStatus("PDB fetch error: " + e.toString()); }
+}
+
+/* fetch predefined molecules + auto-load first */
+async function fetchMoleculeList(){
+  try {
+    const r = await fetch("/molecules");
+    const mols = await r.json();
+    const sel = document.getElementById('moleculeList');
+    sel.innerHTML = "";
+    for(const [name, smi] of Object.entries(mols || {})){
+      const o = document.createElement('option');
+      o.value = smi;
+      o.textContent = name;
+      sel.appendChild(o);
+    }
+    if(sel.options.length > 0){
+      sel.selectedIndex = 0;
+      try { loadMol(sel.value); } catch(e){ console.warn("auto-load failed", e); }
+    } else setStatus("No demo molecules available.");
+  } catch(e){ console.error(e); setStatus("Failed: " + e.toString()); }
+}
+
+/* ---------- Atom pick helper (optional) ---------- */
+function pickAtomNear(normX, normY){
+  if(!viewer) return;
+  const rect = viewerDiv.getBoundingClientRect();
+  const cx = rect.left + normX * rect.width;
+  const cy = rect.top + normY * rect.height;
+  try {
+    if(typeof viewer.pick === "function"){
+      const pick = viewer.pick(cx, cy);
+      if(pick && pick.atom){
+        const atom = pick.atom;
+        if(selectedAtom && selectedAtom.serial === atom.serial){
+          viewer.setStyle({serial: atom.serial}, {sphere:{scale:0.25}, stick:{radius:0.18}});
+          selectedAtom = null;
+        } else {
+          if(selectedAtom) viewer.setStyle({serial:selectedAtom.serial}, {sphere:{scale:0.25}, stick:{radius:0.18}});
+          viewer.setStyle({serial: atom.serial}, highlightStyle);
+          selectedAtom = atom;
+        }
+        viewer.render();
+        setStatus("Atom selected.");
+      } else setStatus("No atom near that spot.");
+    } else setStatus("Pick not supported by this 3Dmol build.");
+  } catch(e){ console.warn("pick error", e); }
+}
+
+/* =========================
+   B3 Thumb-Index Rotation (Direct)
+   - use landmarks 4 (thumb tip) & 8 (index tip)
+   - compute vector thumb->index and map to yaw/pitch
+   - EMA smoothing + high sensitivity
+   ========================= */
+
+let smoothYaw = null, smoothPitch = null;
+const EMA_ALPHA = 0.22;    // smoothing (lower = smoother)
+const SENS_YAW = 18.0;    // ultra-fast horizontal
+const SENS_PITCH = 18.0;  // ultra-fast vertical
+
+function vecThumbToIndex(landmarks){
+  const t = landmarks[4], i = landmarks[8];
+  return { x: i.x - t.x, y: i.y - t.y, z: (i.z||0) - (t.z||0) };
+}
+function vecToAngles(v){
+  const yaw = Math.atan2(v.y, v.x);
+  const len = Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z) || 1e-6;
+  const pitch = Math.asin(Math.max(-1, Math.min(1, -v.z/len)));
+  return { yaw, pitch };
+}
+
+function handleHandsThumbIndex(results){
+  if(!viewer) return;
+
+  if(!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
+    gestureHint.innerText = "Show thumb + index";
+    smoothYaw = null; smoothPitch = null;
+    return;
+  }
+
+  // use first hand only
+  const lm = results.multiHandLandmarks[0];
+
+  // ensure both landmark 4 & 8 present
+  if(!lm[4] || !lm[8]){
+    gestureHint.innerText = "Need thumb & index visible";
+    return;
+  }
+
+  const v = vecThumbToIndex(lm);
+  const ang = vecToAngles(v);
+
+  // initialize smoothing
+  if(smoothYaw === null){
+    smoothYaw = ang.yaw; smoothPitch = ang.pitch;
+    handleHandsThumbIndex.prevYaw = smoothYaw; handleHandsThumbIndex.prevPitch = smoothPitch;
+    gestureHint.innerText = "Tracking (thumb-index)";
+    return;
+  }
+
+  // EMA smoothing
+  smoothYaw = EMA_ALPHA * ang.yaw + (1 - EMA_ALPHA) * smoothYaw;
+  smoothPitch = EMA_ALPHA * ang.pitch + (1 - EMA_ALPHA) * smoothPitch;
+
+  const prevYaw = handleHandsThumbIndex.prevYaw || smoothYaw;
+  const prevPitch = handleHandsThumbIndex.prevPitch || smoothPitch;
+
+  let dyaw = smoothYaw - prevYaw;
+  let dpitch = smoothPitch - prevPitch;
+
+  // wrap normalization
+  if(dyaw > Math.PI) dyaw -= 2*Math.PI;
+  if(dyaw < -Math.PI) dyaw += 2*Math.PI;
+  if(dpitch > Math.PI) dpitch -= 2*Math.PI;
+  if(dpitch < -Math.PI) dpitch += 2*Math.PI;
+
+  const yawApply = dyaw * SENS_YAW;
+  const pitchApply = dpitch * SENS_PITCH;
+
+  // apply rotations (prefer viewer.rotate)
+  try {
+    if(typeof viewer.rotate === "function"){
+      if(Math.abs(yawApply) > 1e-6) viewer.rotate(yawApply, {x:0,y:1,z:0});
+      if(Math.abs(pitchApply) > 1e-6) viewer.rotate(pitchApply, {x:1,y:0,z:0});
+    } else {
+      // best-effort fallback (may be partial)
+      const cur = viewer.getView && viewer.getView();
+      if(cur && cur.center && cur.eye){
+        const cx = cur.center.x, cz = cur.center.z;
+        let ex = cur.eye.x - cx, ez = cur.eye.z - cz;
+        const ca = Math.cos(yawApply), sa = Math.sin(yawApply);
+        const nex = ex*ca - ez*sa, nez = ex*sa + ez*ca;
+        viewer.setView && viewer.setView({ eye:{x:cx+nex, y:cur.eye.y, z:cz+nez}, center: cur.center, up: cur.up});
+      }
+    }
+  } catch(e){ console.warn("rotate apply error", e); }
+
+  try { viewer.render(); } catch(e){}
+
+  handleHandsThumbIndex.prevYaw = smoothYaw;
+  handleHandsThumbIndex.prevPitch = smoothPitch;
+
+  gestureHint.innerText = "Thumb-Index rotation (B3)";
+}
+
+/* Start / stop MediaPipe using thumb-index handler */
+async function startHandControl(){
+  if(handsActive) return;
+  const video = document.getElementById('videoElement');
+
+  hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+  hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.6, minTrackingConfidence:0.6 });
+  hands.onResults(handleHandsThumbIndex);
+
+  cam = new Camera(video, { onFrame: async ()=> await hands.send({image:video}), width:640, height:480 });
+  await cam.start();
+
+  handsActive = true;
+  document.getElementById('enableHands').disabled = true;
+  document.getElementById('disableHands').disabled = false;
+  handUI.style.display = 'block';
+  setStatus("Hand control enabled (thumb-index B3).");
+}
+
+function stopHandControl(){
+  if(!handsActive) return;
+  try { cam.stop(); } catch(e){}
+  try { hands.close(); } catch(e){}
+  handsActive = false;
+  document.getElementById('enableHands').disabled = false;
+  document.getElementById('disableHands').disabled = true;
+  handUI.style.display = 'none';
+  setStatus("Hand control disabled.");
+}
+
+/* ---------- UI hooks ---------- */
+document.getElementById('loadMol').onclick = ()=> loadMol(document.getElementById('smiles').value || document.getElementById('moleculeList').value);
+document.getElementById('loadXYZ').onclick = loadXYZ;
+document.getElementById('loadPDB').onclick = loadPDB;
+document.getElementById('enableHands').onclick = startHandControl;
+document.getElementById('disableHands').onclick = stopHandControl;
+document.getElementById('toggleLabels').onclick = () => {
+  showLabels = !showLabels;
+  document.getElementById('toggleLabels').textContent = showLabels ? "Hide Names" : "Show Names";
+  refreshLabels();
+};
+document.getElementById('inspectMode').onclick = () => {
+  inspectMode = !inspectMode;
+  infoLabelData = null;
+  document.getElementById('inspectMode').textContent = inspectMode ? "Inspect Mode: On" : "Inspect Mode: Off";
+  setStatus(inspectMode ? "Inspect mode enabled. Click an atom to see details." : "Inspect mode disabled.");
+  refreshLabels();
+};
+
+/* init */
+window.onload = () => {
+  initViewer();
+  fetchMoleculeList();
+  setStatus("Ready — Phase 4 (Thumb-Index B3).");
+};
+</script>
+</body>
+</html>
